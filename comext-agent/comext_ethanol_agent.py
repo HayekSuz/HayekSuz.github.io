@@ -11,6 +11,10 @@ Defaults: reporter NL, partner US, CN 2207 10 00, January-June.
 
     python3 comext_ethanol_agent.py --year 2026
     python3 comext_ethanol_agent.py --year 2025 --start 1 --end 12 --json out.json
+    python3 comext_ethanol_agent.py --year 2026 --end 10 --partner ALL
+
+With --partner ALL every origin country is pulled and ranked by its share of
+consumption, over the months for which both trade and consumption data exist.
 
 Standard library only.
 """
@@ -66,6 +70,8 @@ def periods(year: int, start: int, end: int) -> list[str]:
 def fetch_comext(reporter: str, partner: str, product: str, flow: str,
                  months: list[str]) -> tuple[list[dict], str]:
     """Return the raw Comext rows (one per indicator per month) and the URL."""
+    if partner.upper() == "ALL":
+        partner = ""  # empty SDMX key position = every partner
     key = f"M.{reporter}.{partner}.{product}.{flow}.{'+'.join(INDICATORS)}"
     query = urllib.parse.urlencode(
         {"startPeriod": months[0], "endPeriod": months[-1], "format": "SDMX-CSV"})
@@ -79,6 +85,29 @@ def fetch_comext(reporter: str, partner: str, product: str, flow: str,
     if not text.lstrip().startswith("DATAFLOW"):
         raise RuntimeError(f"Unexpected Comext response: {text[:300]}")
     return list(csv.DictReader(io.StringIO(text))), url
+
+
+def fetch_partner_names() -> dict[str, str]:
+    """Comext partner code -> English name."""
+    url = (f"{COMEXT_API.rsplit('/', 1)[0]}/codelist/ESTAT/CXT_FREE_ISO"
+           "?format=TSV&lang=en")
+    names = {}
+    for line in http_get(url).decode("utf-8-sig").splitlines():
+        code, _, name = line.partition("\t")
+        # Drop historical footnotes such as "(incl. ... from 1995 -> 2000)".
+        names[code] = name.split(" (")[0].strip()
+    return names
+
+
+def to_m3(t: dict[str, float]) -> tuple[float | None, float | None, float, str]:
+    """(kg, litres, m3, basis) for one partner-month of Comext indicators."""
+    kg = t["QUANTITY_IN_100KG"] * 100 if "QUANTITY_IN_100KG" in t else None
+    litres = t.get("SUPPLEMENTARY_QUANTITY")
+    if litres:
+        return kg, litres, litres / 1000, "supplementary quantity (litres)"
+    if kg:
+        return kg, litres, kg / ETHANOL_DENSITY / 1000, "net mass / density"
+    return kg, litres, 0.0, "no trade reported"
 
 
 def fetch_consumption(geo: str, months: list[str], siec: str,
@@ -117,14 +146,7 @@ def build_report(args: argparse.Namespace) -> dict:
     monthly = []
     for m in months:
         t = trade[m]
-        kg = t["QUANTITY_IN_100KG"] * 100 if "QUANTITY_IN_100KG" in t else None
-        litres = t.get("SUPPLEMENTARY_QUANTITY")
-        if litres:
-            m3, basis = litres / 1000, "supplementary quantity (litres)"
-        elif kg:
-            m3, basis = kg / ETHANOL_DENSITY / 1000, "net mass / density"
-        else:
-            m3, basis = 0.0, "no trade reported"
+        kg, litres, m3, basis = to_m3(t)
         kt = cons.get(m)
         cons_m3 = kt * 1000 / ETHANOL_DENSITY if kt is not None else None
         monthly.append({
@@ -163,6 +185,101 @@ def build_report(args: argparse.Namespace) -> dict:
             "months_missing_consumption": missing,
         },
     }
+
+
+def build_partner_report(args: argparse.Namespace) -> dict:
+    """All origin countries, ranked by share of consumption."""
+    months = periods(args.year, args.start, args.end)
+    rows, comext_url = fetch_comext(args.reporter, "ALL", args.product,
+                                    args.flow, months)
+    cons, energy_url = fetch_consumption(args.reporter, months, args.siec,
+                                         args.nrg_bal)
+    names = fetch_partner_names()
+
+    trade: dict[str, dict[str, dict[str, float]]] = {}
+    for row in rows:
+        if row["OBS_VALUE"] not in ("", None):
+            trade.setdefault(row["partner"], {}).setdefault(
+                row["TIME_PERIOD"], {})[row["indicators"]] = float(row["OBS_VALUE"])
+
+    # Intra-EU trade is published later than extra-EU trade, so a month only
+    # counts as complete once the WORLD aggregate has a row for it.
+    window = [m for m in months if m in cons and m in trade.get("WORLD", {})]
+    cons_m3 = sum(cons[m] for m in window) * 1000 / ETHANOL_DENSITY
+
+    def summarise(code: str) -> dict:
+        monthly = {m: to_m3(trade[code].get(m, {}))[2] for m in months}
+        m3 = sum(monthly[m] for m in window)
+        return {
+            "partner": code,
+            "name": names.get(code, code),
+            "import_m3": m3,
+            "import_value_eur": sum(trade[code].get(m, {}).get("VALUE_IN_EUROS", 0)
+                                    for m in window),
+            "share": m3 / cons_m3 if cons_m3 else None,
+            "monthly_m3": monthly,
+        }
+
+    # Aggregates (WORLD, EXT_EU, INT_EU27_2020, ...) have codes longer than
+    # two characters; individual partners are two-letter codes.
+    partners = sorted((summarise(c) for c in trade if len(c) == 2),
+                      key=lambda p: -p["import_m3"])
+    return {
+        "query": {
+            "reporter": args.reporter, "partner": "ALL",
+            "product": args.product, "flow": args.flow,
+            "period_requested": f"{months[0]}..{months[-1]}",
+            "period_compared": f"{window[0]}..{window[-1]}" if window else None,
+            "months_excluded": [m for m in months if m not in window],
+            "consumption_series": f"{ENERGY_DATASET} {args.siec} {args.nrg_bal}",
+            "density_t_per_m3": ETHANOL_DENSITY,
+        },
+        "sources": {"comext": comext_url, "consumption": energy_url},
+        "comext_last_update": rows[0]["LAST UPDATE"] if rows else None,
+        "consumption_m3": cons_m3,
+        "partners": partners,
+        "world": summarise("WORLD") if "WORLD" in trade else None,
+    }
+
+
+def print_partner_report(rep: dict, top: int) -> None:
+    q = rep["query"]
+    print(f"Comext {COMEXT_DATASET}: reporter {q['reporter']}, all partners, "
+          f"CN {q['product']}, flow {q['flow']} (1 = import)")
+    print(f"Comext last update: {rep['comext_last_update']}")
+    if not q["period_compared"]:
+        print(f"\nNo month in {q['period_requested']} has both trade and "
+              "consumption data.")
+        return
+    print(f"Compared period: {q['period_compared']}"
+          + (f"  (excluded, data incomplete: {', '.join(q['months_excluded'])})"
+             if q["months_excluded"] else ""))
+    print(f"Consumption ({q['consumption_series']}, {q['density_t_per_m3']} t/m3): "
+          f"{rep['consumption_m3']:,.0f} m3\n")
+
+    head = f"{'#':>3} {'':2} {'origin':28} {'imports m3':>12} {'EUR':>14} {'share':>7}"
+    print(head)
+    print("-" * len(head))
+
+    def line(rank: str, p: dict, name: str | None = None) -> None:
+        print(f"{rank:>3} {p['partner'][:2] if name is None else '':2} "
+              f"{(name or p['name'])[:28]:28} {p['import_m3']:>12,.0f} "
+              f"{p['import_value_eur']:>14,.0f} {fmt(p['share'], '.1%'):>7}")
+
+    partners = [p for p in rep["partners"] if p["import_m3"] >= 0.5]
+    shown = partners[:top] if top else partners
+    for i, p in enumerate(shown, 1):
+        line(str(i), p)
+    rest = partners[len(shown):]
+    if rest:
+        line("", {
+            "partner": "", "import_m3": sum(p["import_m3"] for p in rest),
+            "import_value_eur": sum(p["import_value_eur"] for p in rest),
+            "share": sum(p["share"] for p in rest),
+        }, f"other ({len(rest)} countries)")
+    print("-" * len(head))
+    if rep["world"]:
+        line("", rep["world"], "all origins (WORLD)")
 
 
 def fmt(value, spec: str = ",.0f") -> str:
@@ -212,7 +329,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--start", type=int, default=1, help="first month")
     p.add_argument("--end", type=int, default=6, help="last month")
     p.add_argument("--reporter", default="NL")
-    p.add_argument("--partner", default="US")
+    p.add_argument("--partner", default="US",
+                   help="partner code, or ALL for every origin country")
+    p.add_argument("--top", type=int, default=20,
+                   help="with --partner ALL: countries to list (0 = all)")
     p.add_argument("--product", default="22071000", help="CN8 code, no spaces")
     p.add_argument("--flow", default="1", help="1 = import, 2 = export")
     p.add_argument("--siec", default="R5210B",
@@ -226,12 +346,16 @@ def main(argv: list[str] | None = None) -> int:
     args.product = args.product.replace(" ", "")
 
     try:
-        rep = build_report(args)
+        by_partner = args.partner.upper() == "ALL"
+        rep = build_partner_report(args) if by_partner else build_report(args)
     except urllib.error.HTTPError as err:
         print(f"Eurostat rejected the request (HTTP {err.code}) - check the "
               f"reporter/partner/product codes.\n{err.url}", file=sys.stderr)
         return 1
-    print_report(rep)
+    if by_partner:
+        print_partner_report(rep, args.top)
+    else:
+        print_report(rep)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(rep, fh, indent=2)
