@@ -6,7 +6,7 @@
     "flow": "1",
     "period": "2026-01..2026-06",
     "consumption_series": "nrg_cb_oilm R5210B GID_OBS",
-    "density_t_per_m3": 0.789
+    "density_t_per_m3": 0.7887
   },
   "sources": {
     "comext": "https://ec.europa.eu/eurostat/api/comext/dissemination/sdmx/2.1/data/DS-045409/M.NL.US.22071000.1.QUANTITY_IN_100KG+SUPPLEMENTARY_QUANTITY+VALUE_IN_EUROS?startPeriod=2026-01&endPeriod=2026-06&format=SDMX-CSV",
@@ -240,8 +240,8 @@
       "import_m3": 3980.573,
       "import_m3_basis": "supplementary quantity (litres)",
       "consumption_kt": 29.098,
-      "consumption_m3": 36879.59442332066,
-      "share": 0.10793429435012715
+      "consumption_m3": 36893.62241663497,
+      "share": 0.10789325469448072
     },
     {
       "period": "2026-02",
@@ -251,8 +251,8 @@
       "import_m3": 13426.172,
       "import_m3_basis": "supplementary quantity (litres)",
       "consumption_kt": 30.775,
-      "consumption_m3": 39005.06970849176,
-      "share": 0.34421607499593826
+      "consumption_m3": 39019.90617471789,
+      "share": 0.34408519435905766
     },
     {
       "period": "2026-03",
@@ -262,8 +262,8 @@
       "import_m3": 8950.974,
       "import_m3_basis": "supplementary quantity (litres)",
       "consumption_kt": 48.017,
-      "consumption_m3": 60858.04816223067,
-      "share": 0.14707954445300625
+      "consumption_m3": 60881.19690630151,
+      "share": 0.14702362067184538
     },
     {
       "period": "2026-04",
@@ -273,8 +273,8 @@
       "import_m3": 16896.848,
       "import_m3_basis": "supplementary quantity (litres)",
       "consumption_kt": 47.836,
-      "consumption_m3": 60628.64385297845,
-      "share": 0.2786941439919726
+      "consumption_m3": 60651.70533789781,
+      "share": 0.27858817663684254
     },
     {
       "period": "2026-05",
@@ -284,8 +284,8 @@
       "import_m3": 2468.289,
       "import_m3_basis": "supplementary quantity (litres)",
       "consumption_kt": 41.13,
-      "consumption_m3": 52129.277566539924,
-      "share": 0.04734938052516412
+      "consumption_m3": 52149.106124001526,
+      "share": 0.04733137695842451
     },
     {
       "period": "2026-06",
@@ -295,15 +295,15 @@
       "import_m3": 0.001,
       "import_m3_basis": "supplementary quantity (litres)",
       "consumption_kt": 43.096,
-      "consumption_m3": 54621.039290240806,
-      "share": 1.8307963616112865e-08
+      "consumption_m3": 54641.81564599975,
+      "share": 1.8301002413217003e-08
     }
   ],
   "total": {
     "import_m3": 45722.857,
     "import_value_eur": 24067482.0,
-    "consumption_m3": 304121.67300380225,
-    "share": 0.15034396117973597,
+    "consumption_m3": 304237.35260555346,
+    "share": 0.1502867961754851,
     "months_missing_consumption": []
   }
 }

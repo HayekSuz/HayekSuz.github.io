@@ -31,10 +31,10 @@ COMEXT_DATASET = "DS-045409"
 ENERGY_API = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
 ENERGY_DATASET = "nrg_cb_oilm"
 
-# Density of ethanol at 20 degC, t/m3 (= kg/l). Used to turn the energy
+# Density of ethanol, t/m3 (= kg/l). Used to turn the energy
 # statistics (thousand tonnes) into volume, and as a fallback for trade rows
 # that have a net mass but no supplementary quantity.
-ETHANOL_DENSITY = 0.789
+ETHANOL_DENSITY = 0.7887
 
 INDICATORS = ("QUANTITY_IN_100KG", "SUPPLEMENTARY_QUANTITY", "VALUE_IN_EUROS")
 
