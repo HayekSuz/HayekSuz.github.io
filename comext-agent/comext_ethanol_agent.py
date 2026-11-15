@@ -13,8 +13,12 @@ Defaults: reporter NL, partner US, CN 2207 10 00, January-June.
     python3 comext_ethanol_agent.py --year 2025 --start 1 --end 12 --json out.json
     python3 comext_ethanol_agent.py --year 2026 --end 10 --partner ALL
 
-With --partner ALL every origin country is pulled and ranked by its share of
-consumption, over the months for which both trade and consumption data exist.
+With --partner ALL every partner country is pulled, with imports, exports and
+net imports (imports minus exports) and their share of consumption, over the
+months for which both trade and consumption data exist. Partners are grouped
+into EU and non-EU because the two have different customs status: EU ethanol
+is Union goods (T2), while non-EU ethanol is non-Union (T1) until released for
+free circulation, and T1 and T2 product cannot share a tank.
 
 Standard library only.
 """
@@ -39,6 +43,9 @@ ENERGY_DATASET = "nrg_cb_oilm"
 # statistics (thousand tonnes) into volume, and as a fallback for trade rows
 # that have a net mass but no supplementary quantity.
 ETHANOL_DENSITY = 0.7887
+
+EU27 = frozenset("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL "
+                 "PL PT RO SK SI ES SE".split())
 
 INDICATORS = ("QUANTITY_IN_100KG", "SUPPLEMENTARY_QUANTITY", "VALUE_IN_EUROS")
 
@@ -188,46 +195,63 @@ def build_report(args: argparse.Namespace) -> dict:
 
 
 def build_partner_report(args: argparse.Namespace) -> dict:
-    """All origin countries, ranked by share of consumption."""
+    """All partner countries: imports, exports and net, as share of consumption."""
     months = periods(args.year, args.start, args.end)
     rows, comext_url = fetch_comext(args.reporter, "ALL", args.product,
-                                    args.flow, months)
+                                    "1+2", months)
     cons, energy_url = fetch_consumption(args.reporter, months, args.siec,
                                          args.nrg_bal)
     names = fetch_partner_names()
 
-    trade: dict[str, dict[str, dict[str, float]]] = {}
+    # trade[flow][partner][month][indicator]; flow "1" = import, "2" = export
+    trade: dict[str, dict[str, dict[str, dict[str, float]]]] = {"1": {}, "2": {}}
     for row in rows:
         if row["OBS_VALUE"] not in ("", None):
-            trade.setdefault(row["partner"], {}).setdefault(
+            trade[row["flow"]].setdefault(row["partner"], {}).setdefault(
                 row["TIME_PERIOD"], {})[row["indicators"]] = float(row["OBS_VALUE"])
 
     # Intra-EU trade is published later than extra-EU trade, so a month only
     # counts as complete once the WORLD aggregate has a row for it.
-    window = [m for m in months if m in cons and m in trade.get("WORLD", {})]
+    window = [m for m in months if m in cons
+              and all(m in trade[f].get("WORLD", {}) for f in ("1", "2"))]
     cons_m3 = sum(cons[m] for m in window) * 1000 / ETHANOL_DENSITY
 
+    def share(m3: float) -> float | None:
+        return m3 / cons_m3 if cons_m3 else None
+
     def summarise(code: str) -> dict:
-        monthly = {m: to_m3(trade[code].get(m, {}))[2] for m in months}
-        m3 = sum(monthly[m] for m in window)
-        return {
-            "partner": code,
-            "name": names.get(code, code),
-            "import_m3": m3,
-            "import_value_eur": sum(trade[code].get(m, {}).get("VALUE_IN_EUROS", 0)
-                                    for m in window),
-            "share": m3 / cons_m3 if cons_m3 else None,
-            "monthly_m3": monthly,
-        }
+        out = {"partner": code, "name": names.get(code, code),
+               "group": "EU" if code in EU27 else "non-EU"}
+        for flow, label in (("1", "import"), ("2", "export")):
+            by_month = trade[flow].get(code, {})
+            monthly = {m: to_m3(by_month.get(m, {}))[2] for m in months}
+            out[f"{label}_m3"] = sum(monthly[m] for m in window)
+            out[f"{label}_value_eur"] = sum(
+                by_month.get(m, {}).get("VALUE_IN_EUROS", 0) for m in window)
+            out[f"{label}_monthly_m3"] = monthly
+        out["net_m3"] = out["import_m3"] - out["export_m3"]
+        out["share"] = share(out["import_m3"])
+        out["net_share"] = share(out["net_m3"])
+        return out
+
+    def subtotal(group: str, members: list[dict]) -> dict:
+        tot = {"partner": "", "name": f"{group} subtotal", "group": group}
+        for key in ("import_m3", "export_m3", "net_m3"):
+            tot[key] = sum(p[key] for p in members)
+        tot["share"], tot["net_share"] = share(tot["import_m3"]), share(tot["net_m3"])
+        return tot
 
     # Aggregates (WORLD, EXT_EU, INT_EU27_2020, ...) have codes longer than
     # two characters; individual partners are two-letter codes.
-    partners = sorted((summarise(c) for c in trade if len(c) == 2),
+    codes = {c for f in trade.values() for c in f if len(c) == 2}
+    partners = sorted((summarise(c) for c in codes),
                       key=lambda p: -p["import_m3"])
+    groups = [subtotal(g, [p for p in partners if p["group"] == g])
+              for g in ("EU", "non-EU")]
     return {
         "query": {
             "reporter": args.reporter, "partner": "ALL",
-            "product": args.product, "flow": args.flow,
+            "product": args.product, "flow": "1+2",
             "period_requested": f"{months[0]}..{months[-1]}",
             "period_compared": f"{window[0]}..{window[-1]}" if window else None,
             "months_excluded": [m for m in months if m not in window],
@@ -238,14 +262,15 @@ def build_partner_report(args: argparse.Namespace) -> dict:
         "comext_last_update": rows[0]["LAST UPDATE"] if rows else None,
         "consumption_m3": cons_m3,
         "partners": partners,
-        "world": summarise("WORLD") if "WORLD" in trade else None,
+        "groups": groups,
+        "world": {**summarise("WORLD"), "name": "all partners (WORLD)", "group": ""},
     }
 
 
 def print_partner_report(rep: dict, top: int) -> None:
     q = rep["query"]
     print(f"Comext {COMEXT_DATASET}: reporter {q['reporter']}, all partners, "
-          f"CN {q['product']}, flow {q['flow']} (1 = import)")
+          f"CN {q['product']}, imports and exports")
     print(f"Comext last update: {rep['comext_last_update']}")
     if not q["period_compared"]:
         print(f"\nNo month in {q['period_requested']} has both trade and "
@@ -255,31 +280,35 @@ def print_partner_report(rep: dict, top: int) -> None:
           + (f"  (excluded, data incomplete: {', '.join(q['months_excluded'])})"
              if q["months_excluded"] else ""))
     print(f"Consumption ({q['consumption_series']}, {q['density_t_per_m3']} t/m3): "
-          f"{rep['consumption_m3']:,.0f} m3\n")
+          f"{rep['consumption_m3']:,.0f} m3")
+    print("Shares are of consumption; net = imports - exports.\n")
 
-    head = f"{'#':>3} {'':2} {'origin':28} {'imports m3':>12} {'EUR':>14} {'share':>7}"
+    head = (f"{'#':>3} {'':2} {'partner':24} {'':6} {'imports m3':>11} "
+            f"{'exports m3':>11} {'net m3':>11} {'imp.share':>9} {'net share':>9}")
     print(head)
     print("-" * len(head))
 
-    def line(rank: str, p: dict, name: str | None = None) -> None:
-        print(f"{rank:>3} {p['partner'][:2] if name is None else '':2} "
-              f"{(name or p['name'])[:28]:28} {p['import_m3']:>12,.0f} "
-              f"{p['import_value_eur']:>14,.0f} {fmt(p['share'], '.1%'):>7}")
+    def line(rank: str, p: dict) -> None:
+        print(f"{rank:>3} {p['partner']:2} {p['name'][:24]:24} {p['group']:6} "
+              f"{p['import_m3']:>11,.0f} {p['export_m3']:>11,.0f} "
+              f"{p['net_m3']:>11,.0f} {fmt(p['share'], '.1%'):>9} "
+              f"{fmt(p['net_share'], '.1%'):>9}")
 
-    partners = [p for p in rep["partners"] if p["import_m3"] >= 0.5]
+    partners = [p for p in rep["partners"]
+                if p["import_m3"] >= 0.5 or p["export_m3"] >= 0.5]
     shown = partners[:top] if top else partners
     for i, p in enumerate(shown, 1):
         line(str(i), p)
     rest = partners[len(shown):]
     if rest:
-        line("", {
-            "partner": "", "import_m3": sum(p["import_m3"] for p in rest),
-            "import_value_eur": sum(p["import_value_eur"] for p in rest),
-            "share": sum(p["share"] for p in rest),
-        }, f"other ({len(rest)} countries)")
+        other = {"partner": "", "name": f"other ({len(rest)} countries)", "group": ""}
+        for key in ("import_m3", "export_m3", "net_m3", "share", "net_share"):
+            other[key] = sum(p[key] for p in rest)
+        line("", other)
     print("-" * len(head))
-    if rep["world"]:
-        line("", rep["world"], "all origins (WORLD)")
+    for g in rep["groups"]:
+        line("", {**g, "group": ""})
+    line("", {**rep["world"], "partner": ""})
 
 
 def fmt(value, spec: str = ",.0f") -> str:
@@ -334,7 +363,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--top", type=int, default=20,
                    help="with --partner ALL: countries to list (0 = all)")
     p.add_argument("--product", default="22071000", help="CN8 code, no spaces")
-    p.add_argument("--flow", default="1", help="1 = import, 2 = export")
+    p.add_argument("--flow", default="1",
+                   help="1 = import, 2 = export (ignored with --partner ALL)")
     p.add_argument("--siec", default="R5210B",
                    help="energy product for consumption (blended biogasoline)")
     p.add_argument("--nrg-bal", default="GID_OBS",
